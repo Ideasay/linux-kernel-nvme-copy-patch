@@ -57,6 +57,9 @@ void blk_set_default_limits(struct queue_limits *lim)
 	lim->misaligned = 0;
 	lim->zoned = BLK_ZONED_NONE;
 	lim->zone_write_granularity = 0;
+	lim->max_copy_sectors = 0;
+	lim->max_copy_nr_ranges = 0;
+	lim->max_copy_range_sectors = 0;
 }
 EXPORT_SYMBOL(blk_set_default_limits);
 
@@ -573,6 +576,14 @@ int blk_stack_limits(struct queue_limits *t, struct queue_limits *b,
 	/* Set non-power-of-2 compatible chunk_sectors boundary */
 	if (b->chunk_sectors)
 		t->chunk_sectors = gcd(t->chunk_sectors, b->chunk_sectors);
+	
+	/* copy limits */
+	t->max_copy_sectors = min_not_zero(t->max_copy_sectors,
+			b->max_copy_sectors);
+	t->max_copy_range_sectors = min_not_zero(t->max_copy_range_sectors,
+			b->max_copy_range_sectors);
+	t->max_copy_nr_ranges = min_not_zero(t->max_copy_nr_ranges,
+			b->max_copy_nr_ranges);
 
 	/* Physical block size a multiple of the logical block size? */
 	if (t->physical_block_size & (t->logical_block_size - 1)) {

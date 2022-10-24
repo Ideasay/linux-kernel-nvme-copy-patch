@@ -63,6 +63,17 @@ struct fstrim_range {
 	__u64 len;
 	__u64 minlen;
 };
+struct range_entry {
+	__u64 src;
+	__u64 len;
+};
+
+struct copy_range {
+	__u64 dest;
+	__u64 nr_range;
+	__u64 range_list;
+	__u64 rsvd;
+};
 
 /* extent-same (dedupe) ioctls; these MUST match the btrfs ioctl definitions */
 #define FILE_DEDUPE_RANGE_SAME		0
@@ -184,6 +195,7 @@ struct fsxattr {
 #define BLKSECDISCARD _IO(0x12,125)
 #define BLKROTATIONAL _IO(0x12,126)
 #define BLKZEROOUT _IO(0x12,127)
+#define BLKCOPY _IOWR(0x12, 128, struct copy_range)
 #define BLKGETDISKSEQ _IOR(0x12,128,__u64)
 /*
  * A jump here: 130-136 are reserved for zoned block devices

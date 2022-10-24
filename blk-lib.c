@@ -150,6 +150,128 @@ int blkdev_issue_discard(struct block_device *bdev, sector_t sector,
 	return ret;
 }
 EXPORT_SYMBOL(blkdev_issue_discard);
+int __blkdev_issue_copy(struct block_device *bdev, sector_t dest,
+		sector_t nr_srcs, struct range_entry *rlist, gfp_t gfp_mask,
+		int flags, struct bio **biop)
+{
+	struct request_queue *q = bdev_get_queue(bdev);
+	struct bio *bio;
+	struct blk_copy_payload *payload;
+	sector_t bs_mask;
+	sector_t src_sects, len = 0, total_len = 0;
+	int i, ret, total_size;
+
+	if (!q)
+		return -ENXIO;
+
+	if (!nr_srcs)
+		return -EINVAL;
+
+	if (bdev_read_only(bdev))
+		return -EPERM;
+
+	if (!blk_queue_copy(q))
+		return -EOPNOTSUPP;
+
+	bs_mask = (bdev_logical_block_size(bdev) >> 9) - 1;
+	if (dest & bs_mask)
+		return -EINVAL;
+
+	total_size = struct_size(payload, range, nr_srcs);
+	payload = kmalloc(total_size, GFP_ATOMIC | __GFP_NOWARN);
+	if (!payload)
+		return -ENOMEM;
+
+	bio = bio_alloc(gfp_mask, 1);
+	bio->bi_iter.bi_sector = dest;
+	bio->bi_opf = REQ_OP_COPY | REQ_NOMERGE;
+	bio_set_dev(bio, bdev);
+
+	payload->dest = dest;
+
+	for (i = 0; i < nr_srcs; i++) {
+		/*  copy payload provided are in bytes */
+		src_sects = rlist[i].src;
+		if (src_sects & bs_mask) {
+			ret =  -EINVAL;
+			goto err;
+		}
+		src_sects = src_sects >> SECTOR_SHIFT;
+
+		if (len & bs_mask) {
+			ret = -EINVAL;
+			goto err;
+		}
+
+		len = rlist[i].len >> SECTOR_SHIFT;
+		if (len > q->limits.max_copy_range_sectors) {
+			ret = -EINVAL;
+			goto err;
+		}
+
+		total_len += len;
+
+		WARN_ON_ONCE((src_sects << 9) > UINT_MAX);
+
+		payload->range[i].src = src_sects;
+		payload->range[i].len = len;
+	}
+
+	/* storing # of source ranges */
+	payload->copy_range = i;
+	/* storing copy len so far */
+	payload->copy_size = total_len;
+
+	ret = bio_add_page(bio, virt_to_page(payload), total_size,
+					   offset_in_page(payload));
+	if (ret != total_size) {
+		ret = -ENOMEM;
+		goto err;
+	}
+
+	*biop = bio;
+	return 0;
+err:
+	kfree(payload);	
+	bio_put(bio);
+	return ret;
+}
+EXPORT_SYMBOL(__blkdev_issue_copy);
+
+/**
+ * blkdev_issue_copy - queue a copy
+ * @bdev:       blockdev to issue copy for
+ * @dest:	dest sector
+ * @nr_srcs:	number of source ranges to copy
+ * @rlist:	list of range entries
+ * @gfp_mask:   memory allocation flags (for bio_alloc)
+ * @flags:      BLKDEV_COPY_* flags to control behaviour	//TODO
+ *
+ * Description:
+ *    Issue a copy request for dest sector with source in rlist
+ */
+int blkdev_issue_copy(struct block_device *bdev, sector_t dest,
+		int nr_srcs, struct range_entry *rlist,
+		gfp_t gfp_mask, unsigned long flags)
+{
+	struct bio *bio = NULL;
+	int ret;
+
+	ret = __blkdev_issue_copy(bdev, dest, nr_srcs, rlist, gfp_mask, flags,
+			&bio);
+	if (!ret && bio) {
+		ret = submit_bio_wait(bio);
+		if (ret == -EOPNOTSUPP)
+			ret = 0;
+
+		kfree(page_address(bio_first_bvec_all(bio)->bv_page) +
+				bio_first_bvec_all(bio)->bv_offset);
+		bio_put(bio);
+	}
+
+	return ret;
+}
+EXPORT_SYMBOL(blkdev_issue_copy);
 
 /**
  * __blkdev_issue_write_same - generate number of bios with same page

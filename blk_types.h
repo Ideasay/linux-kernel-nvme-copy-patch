@@ -348,7 +348,8 @@ enum req_opf {
 	REQ_OP_ZONE_RESET	= 15,
 	/* reset all the zone present on the device */
 	REQ_OP_ZONE_RESET_ALL	= 17,
-
+	/* copy ranges within device */
+	REQ_OP_COPY		= 19,
 	/* Driver private requests */
 	REQ_OP_DRV_IN		= 34,
 	REQ_OP_DRV_OUT		= 35,
@@ -469,6 +470,10 @@ static inline bool op_is_sync(unsigned int op)
 static inline bool op_is_discard(unsigned int op)
 {
 	return (op & REQ_OP_MASK) == REQ_OP_DISCARD;
+}
+static inline bool op_is_copy(unsigned int op)
+{
+	return (op & REQ_OP_MASK) == REQ_OP_COPY;
 }
 
 /*

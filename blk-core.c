@@ -721,6 +721,17 @@ static noinline int should_fail_bio(struct bio *bio)
 }
 ALLOW_ERROR_INJECTION(should_fail_bio, ERRNO);
 
+static inline int bio_check_copy_eod(struct bio *bio, sector_t start,
+		sector_t nr_sectors, sector_t maxsector)
+{
+	if (nr_sectors && maxsector &&
+	    (nr_sectors > maxsector || start > maxsector - nr_sectors)) {
+		handle_bad_sector(bio, maxsector);
+		return -EIO;
+	}
+	return 0;
+}
+
 /*
  * Check whether this bio extends beyond the end of the device or partition.
  * This may well happen - the kernel calls bread() without checking the size of
@@ -738,6 +749,64 @@ static inline int bio_check_eod(struct bio *bio)
 		return -EIO;
 	}
 	return 0;
+}
+/*
+ * Check for copy limits and remap source ranges if needed.
+ */
+static int blk_check_copy(struct bio *bio)
+{
+	struct hd_struct *p = NULL;
+	struct request_queue *q = bio->bi_disk->queue;
+	struct blk_copy_payload *payload;
+	int i, maxsector, start_sect = 0, ret = -EIO;
+	unsigned short nr_range;
+
+	rcu_read_lock();
+
+	if (bio->bi_partno) {
+		p = __disk_get_part(bio->bi_disk, bio->bi_partno);
+		if (unlikely(!p))
+			goto out;
+		if (unlikely(bio_check_ro(bio, p)))
+			goto out;
+		maxsector = part_nr_sects_read(p);
+		start_sect = p->start_sect;
+	} else {
+		if (unlikely(bio_check_ro(bio, &bio->bi_disk->part0)))
+			goto out;
+		maxsector =  get_capacity(bio->bi_disk);
+	}
+
+	payload = bio_data(bio);
+	nr_range = payload->copy_range;
+
+	/* cannot handle copy crossing nr_ranges limit */
+	if (payload->copy_range > q->limits.max_copy_nr_ranges)
+		goto out;
+
+	/* cannot handle copy more than copy limits */
+	if (payload->copy_size > q->limits.max_copy_sectors)
+		goto out;
+
+	/* check if copy length crosses eod */
+	if (unlikely(bio_check_copy_eod(bio, bio->bi_iter.bi_sector,
+					payload->copy_size, maxsector)))
+		goto out;
+	bio->bi_iter.bi_sector += start_sect;
+
+	for (i = 0; i < nr_range; i++) {
+		if (unlikely(bio_check_copy_eod(bio, payload->range[i].src,
+					payload->range[i].len, maxsector)))
+			goto out;
+		payload->range[i].src += start_sect;
+	}
+
+	if (p)
+		bio->bi_partno = 0;
+	ret = 0;
+out:
+	rcu_read_unlock();
+	return ret;
 }
 
 /*
@@ -816,13 +885,23 @@ static noinline_for_stack bool submit_bio_checks(struct bio *bio)
 
 	if (should_fail_bio(bio))
 		goto end_io;
-	if (unlikely(bio_check_ro(bio)))
-		goto end_io;
-	if (!bio_flagged(bio, BIO_REMAPPED)) {
-		if (unlikely(bio_check_eod(bio)))
-			goto end_io;
-		if (bdev->bd_partno && unlikely(blk_partition_remap(bio)))
-			goto end_io;
+	//if (unlikely(bio_check_ro(bio)))
+	//	goto end_io;
+	//if (!bio_flagged(bio, BIO_REMAPPED)) {
+	//	if (unlikely(bio_check_eod(bio)))
+	//		goto end_io;
+	//	if (bdev->bd_partno && unlikely(blk_partition_remap(bio)))
+	//		goto end_io;
+	if (likely(!op_is_copy(bio->bi_opf))) {
+		if (bio->bi_partno) {
+			if (unlikely(blk_partition_remap(bio)))
+				goto end_io;
+		} else {
+			if (unlikely(bio_check_ro(bio, &bio->bi_disk->part0)))
+				goto end_io;
+			if (unlikely(bio_check_eod(bio, get_capacity(bio->bi_disk))))
+				goto end_io;
+		}
 	}
 
 	/*
@@ -846,6 +925,12 @@ static noinline_for_stack bool submit_bio_checks(struct bio *bio)
 		if (!blk_queue_discard(q))
 			goto not_supported;
 		break;
+	case REQ_OP_COPY:
+		if (!blk_queue_copy(q))
+			goto not_supported;
+		if (unlikely(blk_check_copy(bio)))
+			goto end_io;
+		break;	
 	case REQ_OP_SECURE_ERASE:
 		if (!blk_queue_secure_erase(q))
 			goto not_supported;
